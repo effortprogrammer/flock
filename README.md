@@ -30,7 +30,7 @@ Add to your `openclaw.json`:
     "list": [
       {
         "id": "orchestrator",
-        "model": { "primary": "anthropic/claude-sonnet-4-20250514" },
+        "model": { "primary": "anthropic/claude-opus-4-5" },
         "tools": { "alsoAllow": ["group:plugins"] },
         "workspace": "~/.openclaw/workspace-orchestrator"
       }
@@ -66,11 +66,11 @@ Send a message to the orchestrator and ask it to create agents:
 
 ```
 Create 5 worker agents:
-1. pm        — archetype: project-manager,              model: anthropic/claude-sonnet-4-20250514
-2. reviewer  — archetype: code-reviewer,                model: anthropic/claude-sonnet-4-20250514
-3. dev-code  — archetype: code-first-developer,         model: anthropic/claude-sonnet-4-20250514
-4. dev-prod  — archetype: production-first-developer,   model: anthropic/claude-sonnet-4-20250514
-5. qa        — archetype: qa,                           model: anthropic/claude-sonnet-4-20250514
+1. pm        — archetype: project-manager,              model: anthropic/claude-opus-4-5
+2. reviewer  — archetype: code-reviewer,                model: google-gemini-cli/gemini-3-flash-preview
+3. dev-code  — archetype: code-first-developer,         model: openai-codex/gpt-5.2
+4. dev-prod  — archetype: production-first-developer,   model: anthropic/claude-opus-4-5
+5. qa        — archetype: qa,                           model: google-gemini-cli/gemini-3-flash-preview
 
 After creating all 5, restart the gateway.
 ```
@@ -213,7 +213,7 @@ Each agent also needs an entry in `agents.list` with model and workspace:
     "list": [
       {
         "id": "dev-code",
-        "model": { "primary": "anthropic/claude-sonnet-4-20250514" },
+        "model": { "primary": "openai-codex/gpt-5.2" },
         "tools": {
           "alsoAllow": ["group:plugins"],
           "sandbox": {
@@ -238,10 +238,10 @@ Each agent can use a different LLM provider/model. Mix and match based on cost a
 ```jsonc
 // Example: heavy reasoning for orchestrator, fast models for workers
 { "id": "orchestrator", "model": { "primary": "anthropic/claude-opus-4-5" } }
-{ "id": "pm",           "model": { "primary": "anthropic/claude-sonnet-4-20250514" } }
-{ "id": "dev-code",     "model": { "primary": "openai/gpt-4.1" } }
-{ "id": "dev-prod",     "model": { "primary": "google/gemini-2.5-flash" } }
-{ "id": "qa",           "model": { "primary": "google/gemini-2.5-flash" } }
+{ "id": "pm",           "model": { "primary": "anthropic/claude-opus-4-5" } }
+{ "id": "dev-code",     "model": { "primary": "openai-codex/gpt-5.2" } }
+{ "id": "dev-prod",     "model": { "primary": "anthropic/claude-opus-4-5" } }
+{ "id": "qa",           "model": { "primary": "google-gemini-cli/gemini-3-flash-preview" } }
 ```
 
 ---
