@@ -22,7 +22,8 @@ export interface GatewaySessionSendOptions {
   token: string;
   /** Logger instance. */
   logger: PluginLogger;
-  /** Response timeout in ms. Default: 120000 */
+  /** Response timeout in ms. Default: 600000 (10 min). Set high to let agents
+   *  work continuously via tool calls without losing turns to timeouts. */
   timeoutMs?: number;
 }
 
@@ -34,7 +35,7 @@ export interface GatewaySessionSendOptions {
  * all LLM provider routing, authentication, and session management.
  */
 export function createGatewaySessionSend(opts: GatewaySessionSendOptions): SessionSendFn {
-  const { port, token, logger, timeoutMs = 120_000 } = opts;
+  const { port, token, logger, timeoutMs = 600_000 } = opts;
   const baseUrl = `http://127.0.0.1:${port}`;
 
   return async (agentId: string, message: string): Promise<string | null> => {

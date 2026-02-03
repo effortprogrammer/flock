@@ -50,7 +50,7 @@ export interface FlockExecutorParams {
   taskStore?: TaskStore;
   /** Logger instance. */
   logger: PluginLogger;
-  /** Timeout for waiting for agent response (ms). Default: 120000 */
+  /** Timeout for waiting for agent response (ms). Default: 600000 (10 min). */
   responseTimeoutMs?: number;
 }
 
@@ -61,7 +61,7 @@ export function createFlockExecutor(params: FlockExecutorParams): AgentExecutor 
     audit,
     taskStore,
     logger,
-    responseTimeoutMs = 120_000,
+    responseTimeoutMs = 600_000,
   } = params;
 
   const isSysadmin = flockMeta.role === "sysadmin" || flockMeta.role === "orchestrator";

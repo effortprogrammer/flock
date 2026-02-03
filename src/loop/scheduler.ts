@@ -28,6 +28,9 @@ const TICK_JITTER_MS = 10_000;
 /** Maximum concurrent tick sends to prevent overload. */
 const MAX_CONCURRENT_TICKS = 4;
 
+/* Agents continue work by making tool calls within a single turn
+   (OpenClaw handles multi-turn tool loop internally). No re-tick needed. */
+
 export interface WorkLoopSchedulerDeps {
   agentLoop: AgentLoopStore;
   a2aClient: A2AClient;
@@ -43,6 +46,7 @@ export class WorkLoopScheduler {
 
   /** Track which threads each agent last saw (agentId → threadId → lastSeenSeq). */
   private agentThreadSeqs = new Map<string, Map<string, number>>();
+
 
   constructor(deps: WorkLoopSchedulerDeps) {
     this.deps = deps;
@@ -123,6 +127,12 @@ export class WorkLoopScheduler {
 
   /**
    * Send a tick to a single agent.
+   *
+   * The agent continues work by making tool calls within a single turn —
+   * OpenClaw handles the multi-turn tool loop internally. Three outcomes:
+   *   1. Agent keeps calling tools → continuous work within this tick
+   *   2. Agent returns final text → waits for next tick (~60s)
+   *   3. Agent calls flock_sleep() then returns → enters SLEEP state
    */
   private async sendTick(agent: AgentLoopRecord, now: number): Promise<void> {
     const { agentLoop, a2aClient, audit, logger } = this.deps;
@@ -133,8 +143,6 @@ export class WorkLoopScheduler {
     try {
       const tickMessage = this.buildTickMessage(agent);
 
-      // Fire-and-forget: send tick without waiting for response processing
-      // The agent's response (if any) will flow through normal A2A channels
       await a2aClient.sendA2A(agent.agentId, {
         message: userMessage(tickMessage),
       });
