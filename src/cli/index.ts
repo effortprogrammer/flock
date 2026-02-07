@@ -111,7 +111,12 @@ async function cmdInit(): Promise<void> {
   const gatewayToken = (config as Record<string, unknown>).gateway &&
     ((config as Record<string, unknown>).gateway as Record<string, unknown>).token;
   let token = typeof gatewayToken === "string" ? gatewayToken : "";
-  if (!token) {
+  if (token) {
+    const input = await prompt("Gateway token (leave empty to keep existing): ");
+    if (input) {
+      token = input;
+    }
+  } else {
     token = await prompt("Gateway token (leave empty to auto-generate): ");
     if (!token) {
       token = crypto.randomUUID().replace(/-/g, "");
@@ -123,7 +128,7 @@ async function cmdInit(): Promise<void> {
   // 1. Ensure plugins structure
   if (!config.plugins) config.plugins = {};
   const plugins = config.plugins as Record<string, unknown>;
-  if (!plugins.load) plugins.load = [];
+  if (!Array.isArray(plugins.load)) plugins.load = [];
   if (!plugins.entries) plugins.entries = {};
 
   // Add flock to plugins.load if not present
