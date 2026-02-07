@@ -132,11 +132,18 @@ async function cmdInit(): Promise<void> {
   // 1. Ensure plugins structure
   if (!config.plugins) config.plugins = {};
   const plugins = config.plugins as Record<string, unknown>;
-  if (!Array.isArray(plugins.load)) plugins.load = [];
+  if (!plugins.load || typeof plugins.load !== "object") {
+    plugins.load = {};
+  } else if (Array.isArray(plugins.load)) {
+    plugins.load = { paths: plugins.load };
+  }
+  if (!Array.isArray((plugins.load as Record<string, unknown>).paths)) {
+    (plugins.load as Record<string, unknown>).paths = [];
+  }
   if (!plugins.entries) plugins.entries = {};
 
   // Add flock to plugins.load if not present
-  const loadList = plugins.load as string[];
+  const loadList = (plugins.load as Record<string, unknown>).paths as string[];
   if (!loadList.includes(pluginPath) && !loadList.some((p) => p.includes("flock"))) {
     loadList.push(pluginPath);
   }
