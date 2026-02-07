@@ -139,8 +139,8 @@ async function cmdInit(): Promise<void> {
 
   // Configure flock plugin (merge with existing to avoid wiping agents)
   const entries = plugins.entries as Record<string, unknown>;
-  const existingFlock = entries.flock as Record<string, unknown> | undefined;
-  const existingConfig = (existingFlock?.config ?? {}) as Record<string, unknown>;
+  const existingFlockEntry = entries.flock as Record<string, unknown> | undefined;
+  const existingConfig = (existingFlockEntry?.config ?? {}) as Record<string, unknown>;
   const existingGatewayAgents = Array.isArray(existingConfig.gatewayAgents)
     ? (existingConfig.gatewayAgents as Array<unknown>)
     : [];
@@ -155,7 +155,7 @@ async function cmdInit(): Promise<void> {
   }
 
   entries.flock = {
-    ...(existingFlock ?? {}),
+    ...(existingFlockEntry ?? {}),
     enabled: true,
     config: {
       ...existingConfig,
