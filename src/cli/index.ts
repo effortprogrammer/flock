@@ -108,9 +108,13 @@ async function cmdInit(): Promise<void> {
   const orchestratorModel = modelInput || defaultModel;
 
   // Ask for gateway token
-  const gatewayToken = (config as Record<string, unknown>).gateway &&
-    ((config as Record<string, unknown>).gateway as Record<string, unknown>).token;
-  let token = typeof gatewayToken === "string" ? gatewayToken : "";
+  const gatewayConfig = (config as Record<string, unknown>).gateway as Record<string, unknown> | undefined;
+  const gatewayAuth = (gatewayConfig?.auth as Record<string, unknown> | undefined) ?? undefined;
+  const authToken = gatewayAuth?.token;
+  const legacyToken = gatewayConfig?.token;
+  let token = typeof authToken === "string"
+    ? authToken
+    : (typeof legacyToken === "string" ? legacyToken : "");
   if (token) {
     const input = await prompt("Gateway token (leave empty to keep existing): ");
     if (input) {
@@ -200,7 +204,9 @@ async function cmdInit(): Promise<void> {
   // 3. Ensure gateway token is set at top level
   if (!config.gateway) config.gateway = {};
   const gw = config.gateway as Record<string, unknown>;
-  gw.token = token;
+  if (!gw.auth || typeof gw.auth !== "object") gw.auth = {};
+  (gw.auth as Record<string, unknown>).token = token;
+  if ("token" in gw) delete gw.token;
 
   // Save
   saveConfig(config);
