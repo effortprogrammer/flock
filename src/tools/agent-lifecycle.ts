@@ -21,6 +21,7 @@ import os from "node:os";
 import type { ToolDefinition, ToolResultOC } from "../types.js";
 import { toOCResult } from "../types.js";
 import { validateId } from "../homes/utils.js";
+import { uniqueId } from "../utils/id.js";
 import { createGatewaySessionSend } from "../transport/gateway-send.js";
 import { createWorkerCard, createSysadminCard } from "../transport/agent-card.js";
 import { createFlockExecutor } from "../transport/executor.js";
@@ -323,7 +324,7 @@ export function createCreateAgentTool(deps: ToolDeps, callerAgentIdFromCtx?: str
 
       // Audit log
       deps.audit.append({
-        id: `agent-create-${newAgentId}-${Date.now()}`,
+        id: uniqueId(`agent-create-${newAgentId}`),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "agent-create",
@@ -476,7 +477,7 @@ export function createDecommissionAgentTool(deps: ToolDeps, callerAgentIdFromCtx
 
       // Audit log
       deps.audit.append({
-        id: `agent-decommission-${targetAgentId}-${Date.now()}`,
+        id: uniqueId(`agent-decommission-${targetAgentId}`),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "agent-decommission",
@@ -542,7 +543,7 @@ export function createRestartGatewayTool(deps: ToolDeps, callerAgentIdFromCtx?: 
 
       // Audit log
       deps.audit.append({
-        id: `gateway-restart-${Date.now()}`,
+        id: uniqueId("gateway-restart"),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "gateway-restart",
