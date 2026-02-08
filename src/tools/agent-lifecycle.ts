@@ -26,6 +26,11 @@ import { createWorkerCard, createSysadminCard } from "../transport/agent-card.js
 import { createFlockExecutor } from "../transport/executor.js";
 import type { ToolDeps } from "./index.js";
 
+/** Generate a unique ID with timestamp and random suffix to prevent collisions. */
+function uniqueId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 /**
  * Resolve the caller agent ID from multiple sources (in priority order):
  * 1. OpenClaw per-request context (callerAgentId from factory)
@@ -323,7 +328,7 @@ export function createCreateAgentTool(deps: ToolDeps, callerAgentIdFromCtx?: str
 
       // Audit log
       deps.audit.append({
-        id: `agent-create-${newAgentId}-${Date.now()}`,
+        id: uniqueId(`agent-create-${newAgentId}`),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "agent-create",
@@ -476,7 +481,7 @@ export function createDecommissionAgentTool(deps: ToolDeps, callerAgentIdFromCtx
 
       // Audit log
       deps.audit.append({
-        id: `agent-decommission-${targetAgentId}-${Date.now()}`,
+        id: uniqueId(`agent-decommission-${targetAgentId}`),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "agent-decommission",
@@ -542,7 +547,7 @@ export function createRestartGatewayTool(deps: ToolDeps, callerAgentIdFromCtx?: 
 
       // Audit log
       deps.audit.append({
-        id: `gateway-restart-${Date.now()}`,
+        id: uniqueId("gateway-restart"),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "gateway-restart",

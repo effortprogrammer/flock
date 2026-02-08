@@ -38,6 +38,11 @@ import type { WorkLoopScheduler } from "../loop/scheduler.js";
 /** Maximum number of rows any query tool will return. */
 const QUERY_LIMIT_MAX = 100;
 
+/** Generate a unique ID with timestamp and random suffix to prevent collisions. */
+function uniqueId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 export interface ToolDeps {
   config: FlockConfig;
   homes: HomeManager;
@@ -619,7 +624,7 @@ function createSysadminRequestTool(deps: ToolDeps): ToolDefinition {
 
         // Record in audit log
         deps.audit.append({
-          id: result.taskId || `sysreq-${Date.now()}`,
+          id: result.taskId || uniqueId("sysreq"),
           timestamp: Date.now(),
           agentId: callerAgentId,
           action: "sysadmin-request",
@@ -646,7 +651,7 @@ function createSysadminRequestTool(deps: ToolDeps): ToolDefinition {
 
         // Audit the failure
         deps.audit.append({
-          id: `sysreq-err-${Date.now()}`,
+          id: uniqueId("sysreq-err"),
           timestamp: Date.now(),
           agentId: callerAgentId,
           action: "sysadmin-request",
@@ -819,7 +824,7 @@ function createMigrateTool(deps: ToolDeps): ToolDefinition {
           const errorMsg = err instanceof Error ? err.message : String(err);
 
           deps.audit.append({
-            id: `migration-error-${Date.now()}`,
+            id: uniqueId("migration-error"),
             timestamp: Date.now(),
             agentId: callerAgentId,
             action: "migration-failed",
@@ -978,7 +983,7 @@ function createSleepTool(deps: ToolDeps): ToolDefinition {
       agentLoop.setState(callerAgentId, "SLEEP", reason);
 
       deps.audit?.append({
-        id: `sleep-${callerAgentId}-${Date.now()}`,
+        id: uniqueId(`sleep-${callerAgentId}`),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "agent-sleep",
@@ -1045,7 +1050,7 @@ function createWakeTool(deps: ToolDeps): ToolDefinition {
       agentLoop.setState(targetAgentId, "AWAKE");
 
       deps.audit?.append({
-        id: `wake-${targetAgentId}-${Date.now()}`,
+        id: uniqueId(`wake-${targetAgentId}`),
         timestamp: Date.now(),
         agentId: callerAgentId,
         action: "agent-wake",
@@ -1268,7 +1273,7 @@ function createMessageTool(deps: ToolDeps): ToolDefinition {
         }
 
         deps.audit.append({
-          id: `msg-err-${Date.now()}`,
+          id: uniqueId("msg-err"),
           timestamp: Date.now(),
           agentId: callerAgentId,
           action: "message",
@@ -1435,7 +1440,7 @@ function notifyAgent(
       });
     }
     deps.audit.append({
-      id: `notify-fail-${threadId}-${target}-${Date.now()}`,
+      id: uniqueId(`notify-fail-${threadId}-${target}`),
       timestamp: Date.now(),
       agentId: target,
       action: "notify-failed",
@@ -1537,7 +1542,7 @@ function createBroadcastTool(deps: ToolDeps): ToolDefinition {
 
       // Audit
       deps.audit.append({
-        id: `broadcast-${threadId}-${Date.now()}`,
+        id: uniqueId(`broadcast-${threadId}`),
         timestamp: startTime,
         agentId: callerAgentId,
         action: "broadcast",
@@ -2194,7 +2199,7 @@ function createTaskRespondTool(deps: ToolDeps): ToolDefinition {
         deps.a2aClient.sendA2A(task.fromAgentId, { message: followUpMessage }).catch((err: unknown) => {
           const errorMsg = err instanceof Error ? err.message : String(err);
           deps.audit.append({
-            id: `task-respond-err-${Date.now()}`,
+            id: uniqueId("task-respond-err"),
             timestamp: Date.now(),
             agentId: callerAgentId,
             action: "task-respond-followup",
