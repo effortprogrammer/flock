@@ -1406,7 +1406,7 @@ function notifyAgent(
     // double-writes and keeps thread_messages as the single source of truth.
     if (result.response) {
       deps.audit.append({
-        id: `notify-ack-${threadId}-${target}-${now}`,
+        id: uniqueId(`notify-ack-${threadId}-${target}`),
         timestamp: now,
         agentId: target,
         action: "notify-ack",
@@ -1650,7 +1650,7 @@ function createThreadPostTool(deps: ToolDeps): ToolDefinition {
 
       // Audit
       deps.audit.append({
-        id: `thread-post-${threadId}-${callerAgentId}-${now}`,
+        id: uniqueId(`thread-post-${threadId}-${callerAgentId}`),
         timestamp: now,
         agentId: callerAgentId,
         action: "thread-post",
