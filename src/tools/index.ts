@@ -21,6 +21,7 @@ import type { AuditLog } from "../audit/log.js";
 import type { HomeFilter, AuditFilter, TaskStore, TaskFilter, TaskRecord } from "../db/index.js";
 import { isTaskState, TASK_STATES } from "../db/index.js";
 import { validateId } from "../homes/utils.js";
+import { uniqueId } from "../utils/id.js";
 import { getSysadminPrompt, loadSysadminProtocol } from "../sysadmin/loader.js";
 import type { A2AClient } from "../transport/client.js";
 import type { A2AServer } from "../transport/server.js";
@@ -37,11 +38,6 @@ import type { WorkLoopScheduler } from "../loop/scheduler.js";
 
 /** Maximum number of rows any query tool will return. */
 const QUERY_LIMIT_MAX = 100;
-
-/** Generate a unique ID with timestamp and random suffix to prevent collisions. */
-function uniqueId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 export interface ToolDeps {
   config: FlockConfig;
@@ -1160,8 +1156,8 @@ function createMessageTool(deps: ToolDeps): ToolDefinition {
         : undefined;
 
       const startTime = Date.now();
-      const contextId = `ctx-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const taskId = `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const contextId = uniqueId("ctx");
+      const taskId = uniqueId("msg");
 
       // Record task in TaskStore (state: submitted)
       const taskStore = deps.taskStore;
@@ -1239,7 +1235,7 @@ function createMessageTool(deps: ToolDeps): ToolDefinition {
           }
 
           deps.audit.append({
-            id: `msg-err-${now}`,
+            id: uniqueId("msg-err"),
             timestamp: now,
             agentId: callerAgentId,
             action: "message",
@@ -1493,7 +1489,7 @@ function createBroadcastTool(deps: ToolDeps): ToolDefinition {
       const message = typeof params.message === "string" ? params.message.trim() : "";
       const threadId = typeof params.threadId === "string" && params.threadId.trim()
         ? params.threadId.trim()
-        : `thread-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        : uniqueId("thread");
 
       if (targets.length === 0) {
         return toOCResult({ ok: false, error: "'to' must contain at least one agent ID." });

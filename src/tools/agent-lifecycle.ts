@@ -21,15 +21,11 @@ import os from "node:os";
 import type { ToolDefinition, ToolResultOC } from "../types.js";
 import { toOCResult } from "../types.js";
 import { validateId } from "../homes/utils.js";
+import { uniqueId } from "../utils/id.js";
 import { createGatewaySessionSend } from "../transport/gateway-send.js";
 import { createWorkerCard, createSysadminCard } from "../transport/agent-card.js";
 import { createFlockExecutor } from "../transport/executor.js";
 import type { ToolDeps } from "./index.js";
-
-/** Generate a unique ID with timestamp and random suffix to prevent collisions. */
-function uniqueId(prefix: string): string {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 /**
  * Resolve the caller agent ID from multiple sources (in priority order):
