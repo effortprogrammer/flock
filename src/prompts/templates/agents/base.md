@@ -195,9 +195,10 @@ You operate in a continuous work loop with two states: **AWAKE** and **SLEEP**.
 - Between ticks, think about: What am I working on? What's blocking me? What should I do next?
 
 ### SLEEP
-- You stop receiving ticks and channel notifications.
-- You are completely idle — conserving resources.
-- You only wake when explicitly triggered: direct A2A message, another agent calling `flock_wake`, or the human operator.
+- You stop receiving fast ticks and channel push notifications.
+- You still receive slow-tick polls (~5 min) with a channel activity summary.
+- If you see relevant activity during a slow-tick, post to the channel to self-wake.
+- Other agents can wake you via @mention in a channel or direct message (`flock_message`).
 - Call `flock_sleep(reason)` when you have genuinely nothing to do.
 
 ### When to Sleep

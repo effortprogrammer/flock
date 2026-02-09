@@ -127,7 +127,6 @@ export function registerFlockTools(api: PluginApi, deps: ToolDeps): void {
     createMigrateTool(deps),
     createUpdateCardTool(deps),
     createSleepTool(deps),
-    createWakeTool(deps),
   ];
 
   for (const tool of toolFactories) {
@@ -950,10 +949,11 @@ function createSleepTool(deps: ToolDeps): ToolDefinition {
   return {
     name: "flock_sleep",
     description:
-      "Enter SLEEP state. You stop receiving work loop ticks and channel notifications. " +
-      "Only call this when you have no pending work and nothing to contribute. " +
-      "You will stay asleep until explicitly woken by another agent (direct message, " +
-      "mention, or flock_wake). Use sparingly — if you might have work soon, stay AWAKE.",
+      "Enter SLEEP state. You stop receiving fast work loop ticks and channel notifications. " +
+      "You will still receive slow-tick polls (~5 min) with a channel activity summary, " +
+      "so you can self-wake by posting if you see something relevant. " +
+      "Other agents can also wake you via @mention in a channel or direct message (flock_message). " +
+      "Only call this when you have no pending work. Use sparingly — if you might have work soon, stay AWAKE.",
     parameters: {
       type: "object",
       properties: {
@@ -997,91 +997,6 @@ function createSleepTool(deps: ToolDeps): ToolDefinition {
         ok: true,
         output: `Entering SLEEP state. You will not receive ticks or channel notifications until woken. Reason: ${reason}`,
         data: { state: "SLEEP", reason },
-      });
-    },
-  };
-}
-
-// --- flock_wake ---
-
-function createWakeTool(deps: ToolDeps): ToolDefinition {
-  return {
-    name: "flock_wake",
-    description:
-      "Wake a sleeping agent. The target agent will transition from SLEEP to AWAKE " +
-      "and start receiving work loop ticks again. Use when you need an agent's input " +
-      "or want them to participate in a discussion.",
-    parameters: {
-      type: "object",
-      required: ["targetAgentId"],
-      properties: {
-        targetAgentId: {
-          type: "string",
-          description: "Agent ID to wake up.",
-        },
-        reason: {
-          type: "string",
-          description: "Why you're waking them (included in the wake notification).",
-        },
-      },
-    },
-    async execute(_toolCallId: string, params: Record<string, unknown>): Promise<ToolResultOC> {
-      const agentLoop = deps.agentLoop;
-      if (!agentLoop) {
-        return toOCResult({ ok: false, error: "Agent loop store not available." });
-      }
-
-      const callerAgentId = typeof params._callerAgentId === "string" ? params._callerAgentId : "unknown";
-      const targetAgentId = typeof params.targetAgentId === "string" ? params.targetAgentId.trim() : "";
-      const reason = typeof params.reason === "string" ? params.reason.trim() : "woken by another agent";
-
-      if (!targetAgentId) {
-        return toOCResult({ ok: false, error: "'targetAgentId' is required." });
-      }
-
-      const current = agentLoop.get(targetAgentId);
-      if (!current) {
-        return toOCResult({ ok: false, error: `Agent "${targetAgentId}" not found in loop state.` });
-      }
-
-      if (current.state === "AWAKE") {
-        return toOCResult({ ok: true, output: `Agent "${targetAgentId}" is already AWAKE.` });
-      }
-
-      agentLoop.setState(targetAgentId, "AWAKE");
-
-      deps.audit?.append({
-        id: uniqueId(`wake-${targetAgentId}`),
-        timestamp: Date.now(),
-        agentId: callerAgentId,
-        action: "agent-wake",
-        level: "GREEN",
-        detail: `Agent "${targetAgentId}" woken by "${callerAgentId}": ${reason.slice(0, 200)}`,
-        result: "completed",
-      });
-
-      // Send a wake notification to the agent via A2A
-      if (deps.a2aClient) {
-        const wakeMessage = [
-          `[Wake Notification]`,
-          `You were woken by ${callerAgentId}.`,
-          `Reason: ${reason}`,
-          ``,
-          `You are now AWAKE. Check your channels and pending work.`,
-        ].join("\n");
-
-        deps.a2aClient.sendA2A(targetAgentId, {
-          message: userMessage(wakeMessage),
-        }).catch((err: unknown) => {
-          const errorMsg = err instanceof Error ? err.message : String(err);
-          deps.logger?.warn(`[flock:wake] Wake notification to "${targetAgentId}" failed: ${errorMsg}`);
-        });
-      }
-
-      return toOCResult({
-        ok: true,
-        output: `Agent "${targetAgentId}" woken up. They will start receiving work loop ticks.`,
-        data: { targetAgentId, state: "AWAKE", wokenBy: callerAgentId },
       });
     },
   };
@@ -1298,6 +1213,23 @@ function createMessageTool(deps: ToolDeps): ToolDefinition {
 const CHANNEL_MSG_LIMIT = 50;
 
 /**
+ * Extract @mentions from a message. Matches @agentId patterns where agentId
+ * is a known channel member. Only returns members that are actually in the
+ * provided members list to prevent false positives.
+ */
+function extractMentions(message: string, members: string[]): string[] {
+  if (!message.includes("@")) return [];
+  const mentioned: string[] = [];
+  for (const member of members) {
+    // Match @agentId at word boundary (handles @agent-name, @agent_name, etc.)
+    if (message.includes(`@${member}`)) {
+      mentioned.push(member);
+    }
+  }
+  return mentioned;
+}
+
+/**
  * Per-agent notification dedup tracker.
  * Maps channelId → agentId → lastNotifiedSeq.
  */
@@ -1350,7 +1282,9 @@ function buildChannelNotification(
   ].filter(Boolean).join("\n");
 }
 
-/** Fire-and-forget: send notification to an agent about channel activity. */
+/** Fire-and-forget: send notification to an agent about channel activity.
+ *  SLEEP agents are skipped — they use slow-tick polling instead of push
+ *  notifications, allowing them to self-wake when they find relevant activity. */
 function notifyAgent(
   deps: ToolDeps,
   target: string,
@@ -1359,11 +1293,11 @@ function notifyAgent(
   taskId: string,
   currentMaxSeq: number,
 ): void {
-  // Skip notification for SLEEP agents — they only wake on explicit triggers.
+  // Skip notification for SLEEP agents — they poll via slow-tick instead.
   if (deps.agentLoop) {
     const loopState = deps.agentLoop.get(target);
     if (loopState?.state === "SLEEP") {
-      deps.logger?.debug?.(`[flock:notify] Skipping "${target}" for channel ${channelId} — agent is SLEEP`);
+      deps.logger?.debug?.(`[flock:notify] Skipping "${target}" for channel ${channelId} — agent is SLEEP (will poll via slow-tick)`);
       return;
     }
   }
@@ -1530,17 +1464,8 @@ function createChannelCreateTool(deps: ToolDeps): ToolDefinition {
         updatedAt: now,
       });
 
-      // Auto-wake SLEEP members
-      if (deps.agentLoop) {
-        for (const member of allMembers) {
-          if (member === callerAgentId) continue;
-          const state = deps.agentLoop.get(member);
-          if (state?.state === "SLEEP") {
-            deps.agentLoop.setState(member, "AWAKE");
-            deps.logger?.info(`[flock:channel-create] Auto-woke "${member}" as channel member`);
-          }
-        }
-      }
+      // SLEEP members are NOT auto-woken — they will discover new channels
+      // via slow-tick polling and self-wake if they find the topic relevant.
 
       let messageCount = 0;
 
@@ -1646,6 +1571,15 @@ function createChannelPostTool(deps: ToolDeps): ToolDefinition {
       const now = Date.now();
       const newSeq = deps.channelMessages.append({ channelId, agentId: callerAgentId, content: message, timestamp: now });
 
+      // Auto-wake: posting to a channel means the agent is actively engaged
+      if (deps.agentLoop) {
+        const loopState = deps.agentLoop.get(callerAgentId);
+        if (loopState?.state === "SLEEP") {
+          deps.agentLoop.setState(callerAgentId, "AWAKE");
+          deps.logger?.info(`[flock:channel-post] Auto-woke "${callerAgentId}" — posted to #${channelId}`);
+        }
+      }
+
       // Track channel participation for work loop
       if (deps.workLoopScheduler) {
         deps.workLoopScheduler.trackChannel(callerAgentId, channelId, newSeq);
@@ -1663,6 +1597,29 @@ function createChannelPostTool(deps: ToolDeps): ToolDefinition {
       });
 
       const totalCount = deps.channelMessages.count(channelId);
+
+      // Detect @mentions in the message and wake mentioned SLEEP agents.
+      // Mentions act as explicit wake triggers (same as the old flock_wake).
+      if (deps.agentLoop && deps.a2aClient) {
+        const mentionedAgents = extractMentions(message, channel.members);
+        for (const mentioned of mentionedAgents) {
+          if (mentioned === callerAgentId) continue;
+          const loopState = deps.agentLoop.get(mentioned);
+          if (loopState?.state === "SLEEP") {
+            deps.agentLoop.setState(mentioned, "AWAKE");
+            deps.logger?.info(`[flock:channel-post] @mention woke "${mentioned}" in #${channelId}`);
+            deps.audit?.append({
+              id: uniqueId(`mention-wake-${mentioned}`),
+              timestamp: now,
+              agentId: callerAgentId,
+              action: "agent-mention-wake",
+              level: "GREEN",
+              detail: `@mention in #${channelId} woke "${mentioned}" (by ${callerAgentId})`,
+              result: "completed",
+            });
+          }
+        }
+      }
 
       // Notify other members from channel record (not from message history)
       if (shouldNotify && deps.a2aClient) {
@@ -1864,17 +1821,8 @@ function createAssignMembersTool(deps: ToolDeps): ToolDefinition {
 
       deps.channelStore.update(channelId, { members: updatedMembers, updatedAt: now });
 
-      // Auto-wake newly added SLEEP members
-      if (deps.agentLoop) {
-        for (const member of toAdd) {
-          if (channel.members.includes(member)) continue; // was already a member
-          const state = deps.agentLoop.get(member);
-          if (state?.state === "SLEEP") {
-            deps.agentLoop.setState(member, "AWAKE");
-            deps.logger?.info(`[flock:assign-members] Auto-woke "${member}" — added to #${channelId}`);
-          }
-        }
-      }
+      // SLEEP members are NOT auto-woken — they will discover new channel
+      // membership via slow-tick polling and self-wake if relevant.
 
       // Track newly added members in work loop scheduler
       if (deps.workLoopScheduler && deps.channelMessages) {

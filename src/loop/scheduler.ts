@@ -10,7 +10,7 @@
  * - AWAKE agents get ticked; SLEEP agents are skipped
  * - Each tick sends an A2A message with context (new channel messages, etc.)
  * - Agents control their own SLEEP transition via flock_sleep tool
- * - SLEEP agents wake only on explicit triggers (direct message, mention, flock_wake)
+ * - SLEEP agents receive slow-ticks (~5 min) and self-wake by posting; also wake on @mention or DM
  */
 
 import type { AgentLoopStore, AgentLoopRecord, ChannelMessageStore, ChannelStore } from "../db/interface.js";
@@ -19,14 +19,26 @@ import type { AuditLog } from "../audit/log.js";
 import type { PluginLogger } from "../types.js";
 import { userMessage } from "../transport/a2a-helpers.js";
 
-/** Base tick interval in ms. */
+/** Base tick interval for AWAKE agents (ms). */
 const TICK_INTERVAL_MS = 60_000;
+
+/** Slow-tick interval for SLEEP agents (ms). 5 minutes. */
+const SLOW_TICK_INTERVAL_MS = 300_000;
 
 /** Max jitter applied to each tick (±). */
 const TICK_JITTER_MS = 10_000;
 
+/** Max jitter for slow-ticks (±). */
+const SLOW_TICK_JITTER_MS = 60_000;
+
 /** Maximum concurrent tick sends to prevent overload. */
 const MAX_CONCURRENT_TICKS = 4;
+
+/** Max retry attempts per tick send. */
+const TICK_MAX_RETRIES = 2;
+
+/** Consecutive tick failures before auto-sleeping an agent. */
+const MAX_CONSECUTIVE_FAILURES = 3;
 
 /* Agents continue work by making tool calls within a single turn
    (OpenClaw handles multi-turn tool loop internally). No re-tick needed. */
@@ -48,6 +60,11 @@ export class WorkLoopScheduler {
   /** Track which channels each agent last saw (agentId → channelId → lastSeenSeq). */
   private agentChannelSeqs = new Map<string, Map<string, number>>();
 
+  /** Track consecutive tick failures per agent for auto-sleep on unreachable agents. */
+  private consecutiveFailures = new Map<string, number>();
+
+  /** Track last slow-tick time per SLEEP agent (in-memory, not persisted). */
+  private lastSlowTickAt = new Map<string, number>();
 
   constructor(deps: WorkLoopSchedulerDeps) {
     this.deps = deps;
@@ -82,40 +99,64 @@ export class WorkLoopScheduler {
   }
 
   /**
-   * Main tick: iterate AWAKE agents and send ticks to those that are due.
+   * Main tick: iterate AWAKE agents (fast tick) and SLEEP agents (slow tick).
    */
   private async tick(): Promise<void> {
     if (!this.running) return;
 
     const now = Date.now();
+
+    // --- Fast ticks for AWAKE agents ---
     const awakeAgents = this.deps.agentLoop.listByState("AWAKE");
-
-    if (awakeAgents.length === 0) return;
-
-    // Determine which agents are due for a tick (with per-agent jitter)
-    const dueAgents: AgentLoopRecord[] = [];
+    const dueAwake: AgentLoopRecord[] = [];
     for (const agent of awakeAgents) {
       const jitter = this.getAgentJitter(agent.agentId);
       const nextTickAt = agent.lastTickAt + TICK_INTERVAL_MS + jitter;
       if (now >= nextTickAt) {
-        dueAgents.push(agent);
+        dueAwake.push(agent);
       }
     }
 
-    if (dueAgents.length === 0) return;
+    // --- Slow ticks for SLEEP agents ---
+    const sleepAgents = this.deps.agentLoop.listByState("SLEEP");
+    const dueSleep: AgentLoopRecord[] = [];
+    for (const agent of sleepAgents) {
+      const lastSlow = this.lastSlowTickAt.get(agent.agentId) ?? 0;
+      const jitter = this.getAgentJitter(agent.agentId);
+      const slowJitter = Math.floor((jitter / TICK_JITTER_MS) * SLOW_TICK_JITTER_MS);
+      const nextSlowTickAt = lastSlow + SLOW_TICK_INTERVAL_MS + slowJitter;
+      if (now >= nextSlowTickAt) {
+        dueSleep.push(agent);
+      }
+    }
 
-    this.deps.logger.debug?.(
-      `[flock:loop] Ticking ${dueAgents.length} agent(s): ${dueAgents.map(a => a.agentId).join(", ")}`,
-    );
+    if (dueAwake.length === 0 && dueSleep.length === 0) return;
 
-    // Send ticks with concurrency limit
-    const queue = [...dueAgents];
+    if (dueAwake.length > 0) {
+      this.deps.logger.debug?.(
+        `[flock:loop] Ticking ${dueAwake.length} AWAKE agent(s): ${dueAwake.map(a => a.agentId).join(", ")}`,
+      );
+    }
+    if (dueSleep.length > 0) {
+      this.deps.logger.debug?.(
+        `[flock:loop] Slow-ticking ${dueSleep.length} SLEEP agent(s): ${dueSleep.map(a => a.agentId).join(", ")}`,
+      );
+    }
+
+    // Send ticks with concurrency limit (AWAKE first, then SLEEP)
+    const queue: Array<{ agent: AgentLoopRecord; isSlow: boolean }> = [
+      ...dueAwake.map(agent => ({ agent, isSlow: false })),
+      ...dueSleep.map(agent => ({ agent, isSlow: true })),
+    ];
     const executing: Promise<void>[] = [];
 
     while (queue.length > 0 || executing.length > 0) {
       while (queue.length > 0 && executing.length < MAX_CONCURRENT_TICKS) {
-        const agent = queue.shift()!;
-        const promise = this.sendTick(agent, now).then(() => {
+        const { agent, isSlow } = queue.shift()!;
+        const tickFn = isSlow
+          ? this.sendSlowTick(agent, now)
+          : this.sendTick(agent, now);
+        const promise = tickFn.then(() => {
           executing.splice(executing.indexOf(promise), 1);
         });
         executing.push(promise);
@@ -127,13 +168,17 @@ export class WorkLoopScheduler {
   }
 
   /**
-   * Send a tick to a single agent.
+   * Send a tick to a single agent with retry.
    *
    * The agent continues work by making tool calls within a single turn —
    * OpenClaw handles the multi-turn tool loop internally. Three outcomes:
    *   1. Agent keeps calling tools → continuous work within this tick
    *   2. Agent returns final text → waits for next tick (~60s)
    *   3. Agent calls flock_sleep() then returns → enters SLEEP state
+   *
+   * On failure: retries up to TICK_MAX_RETRIES times with exponential backoff.
+   * After MAX_CONSECUTIVE_FAILURES consecutive failures, auto-sleeps the agent
+   * to prevent wasting resources on unreachable agents.
    */
   private async sendTick(agent: AgentLoopRecord, now: number): Promise<void> {
     const { agentLoop, a2aClient, audit, logger } = this.deps;
@@ -141,17 +186,34 @@ export class WorkLoopScheduler {
     // Update lastTickAt before sending (prevents double-ticks on slow responses)
     agentLoop.updateLastTick(agent.agentId, now);
 
-    try {
-      const tickMessage = this.buildTickMessage(agent);
+    const tickMessage = this.buildTickMessage(agent);
+    let delivered = false;
 
-      await a2aClient.sendA2A(agent.agentId, {
-        message: userMessage(tickMessage),
-      });
+    for (let attempt = 0; attempt <= TICK_MAX_RETRIES; attempt++) {
+      try {
+        await a2aClient.sendA2A(agent.agentId, {
+          message: userMessage(tickMessage),
+        });
+        delivered = true;
+        break;
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        logger.warn(`[flock:loop] Tick attempt ${attempt + 1}/${TICK_MAX_RETRIES + 1} failed for "${agent.agentId}": ${errorMsg}`);
 
+        if (attempt < TICK_MAX_RETRIES) {
+          await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+        }
+      }
+    }
+
+    if (delivered) {
+      // Reset consecutive failure counter on success
+      this.consecutiveFailures.delete(agent.agentId);
       logger.debug?.(`[flock:loop] Tick sent to "${agent.agentId}"`);
-    } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      logger.warn(`[flock:loop] Tick failed for "${agent.agentId}": ${errorMsg}`);
+    } else {
+      // Track consecutive failures
+      const failures = (this.consecutiveFailures.get(agent.agentId) ?? 0) + 1;
+      this.consecutiveFailures.set(agent.agentId, failures);
 
       audit.append({
         id: `tick-err-${agent.agentId}-${now}`,
@@ -159,10 +221,135 @@ export class WorkLoopScheduler {
         agentId: agent.agentId,
         action: "tick-failed",
         level: "YELLOW",
-        detail: `Work loop tick failed: ${errorMsg.slice(0, 200)}`,
+        detail: `Work loop tick failed after ${TICK_MAX_RETRIES + 1} attempts (consecutive failures: ${failures})`,
+        result: "error",
+      });
+
+      // Auto-sleep agent after too many consecutive failures
+      if (failures >= MAX_CONSECUTIVE_FAILURES) {
+        logger.warn(
+          `[flock:loop] Agent "${agent.agentId}" unreachable for ${failures} consecutive ticks — auto-sleeping`,
+        );
+        agentLoop.setState(agent.agentId, "SLEEP", `Auto-slept: unreachable for ${failures} consecutive ticks`);
+        this.consecutiveFailures.delete(agent.agentId);
+
+        audit.append({
+          id: `auto-sleep-${agent.agentId}-${now}`,
+          timestamp: now,
+          agentId: agent.agentId,
+          action: "agent-auto-sleep",
+          level: "YELLOW",
+          detail: `Agent auto-slept after ${failures} consecutive tick failures — gateway session likely unavailable`,
+          result: "completed",
+        });
+      }
+    }
+  }
+
+  /**
+   * Send a slow-tick to a SLEEP agent.
+   *
+   * Slow-ticks provide a channel activity summary so SLEEP agents can decide
+   * whether to self-wake. The agent reviews recent channel activity and either:
+   *   1. Calls flock_sleep() again → stays SLEEP (or simply returns)
+   *   2. Responds / makes tool calls → indicates interest, but stays SLEEP
+   *      until they explicitly call self-wake or the scheduler sees engagement
+   *
+   * The slow-tick message instructs the agent to call flock_channel_post if
+   * they want to participate, which will naturally transition them to AWAKE
+   * as they start engaging in work loop ticks.
+   */
+  private async sendSlowTick(agent: AgentLoopRecord, now: number): Promise<void> {
+    const { a2aClient, audit, logger } = this.deps;
+
+    this.lastSlowTickAt.set(agent.agentId, now);
+
+    const message = this.buildSlowTickMessage(agent);
+    if (!message) {
+      // No channel activity to report — skip this slow-tick entirely
+      logger.debug?.(`[flock:loop] No channel activity for SLEEP agent "${agent.agentId}" — skipping slow-tick`);
+      return;
+    }
+
+    try {
+      await a2aClient.sendA2A(agent.agentId, {
+        message: userMessage(message),
+      });
+      logger.debug?.(`[flock:loop] Slow-tick sent to SLEEP agent "${agent.agentId}"`);
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[flock:loop] Slow-tick failed for SLEEP agent "${agent.agentId}": ${errorMsg}`);
+
+      audit.append({
+        id: `slow-tick-err-${agent.agentId}-${now}`,
+        timestamp: now,
+        agentId: agent.agentId,
+        action: "slow-tick-failed",
+        level: "YELLOW",
+        detail: `Slow-tick to SLEEP agent failed: ${errorMsg.slice(0, 200)}`,
         result: "error",
       });
     }
+  }
+
+  /**
+   * Build the slow-tick message for a SLEEP agent.
+   * Returns null if there's no channel activity to report.
+   *
+   * The message includes a summary of all channels the agent is a member of
+   * with recent activity, and instructs the agent to self-wake if interested.
+   */
+  private buildSlowTickMessage(agent: AgentLoopRecord): string | null {
+    const { channelStore, channelMessages } = this.deps;
+
+    // Find all channels this agent is a member of
+    const channels = channelStore.list({ member: agent.agentId, archived: false });
+    if (channels.length === 0) return null;
+
+    const channelSummaries: string[] = [];
+
+    for (const ch of channels) {
+      const totalCount = channelMessages.count(ch.channelId);
+      if (totalCount === 0) continue;
+
+      // Get recent messages (last 5) as a preview
+      const allMessages = channelMessages.list({ channelId: ch.channelId });
+      const recentMessages = allMessages.slice(-5);
+      const preview = recentMessages.map(m =>
+        `  [seq ${m.seq}] ${m.agentId}: ${m.content.slice(0, 120)}`,
+      ).join("\n");
+
+      channelSummaries.push(
+        `#${ch.channelId} — ${ch.topic}\n` +
+        `  Members: ${ch.members.join(", ")} | ${totalCount} total messages\n` +
+        preview,
+      );
+    }
+
+    if (channelSummaries.length === 0) return null;
+
+    const sleepDuration = agent.sleptAt ? Date.now() - agent.sleptAt : 0;
+    const sleepMins = Math.floor(sleepDuration / 60_000);
+
+    const lines = [
+      `[Sleep Tick — Periodic Channel Review]`,
+      `State: SLEEP (${sleepMins}m)`,
+      ``,
+      `You are currently sleeping. Here is a summary of recent channel activity:`,
+      ``,
+      `--- Channel Activity Summary ---`,
+      ...channelSummaries,
+      `--- End Summary ---`,
+      ``,
+      `Review the activity above. If any discussion is relevant to your role and you can contribute:`,
+      `  1. Post to the channel: flock_channel_post(channelId="...", message="...")`,
+      `  2. This will automatically transition you to AWAKE state.`,
+      ``,
+      `If nothing requires your attention, do nothing — you will stay asleep and check again in ~5 minutes.`,
+      `Do NOT wake up just to say "nothing to do". Silence is the correct response when sleeping.`,
+    ];
+
+    return lines.join("\n");
   }
 
   /**
